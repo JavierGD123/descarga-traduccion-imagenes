@@ -88,48 +88,21 @@ import sys, os, whisper
 os.add_dll_directory(r'${FFMPEG_DIR}')
 os.environ['PATH'] += r';${FFMPEG_DIR}'
 model = whisper.load_model('base')
-result = model.transcribe(r'${audioPath}', task='transcribe', word_timestamps=True)
+result = model.transcribe(r'${audioPath}', task='transcribe')
 with open(r'${srtPath}', 'w', encoding='utf-8') as f:
-    idx = 1
-    for seg in result['segments']:
-        words = seg.get('words', [])
-        if not words:
-            text = seg['text'].strip()
-            if not text:
-                continue
-            start = seg['start']
-            end = seg['end']
-            sh = int(start // 3600)
-            sm = int((start % 3600) // 60)
-            ss = start % 60
-            eh = int(end // 3600)
-            em = int((end % 3600) // 60)
-            es = end % 60
-            f.write(f'{idx}\\n')
-            f.write(f'{sh:02d}:{sm:02d}:{ss:06.3f} --> {eh:02d}:{em:02d}:{es:06.3f}\\n'.replace('.',','))
-            f.write(f'{text}\\n\\n')
-            idx += 1
-            continue
-        i = 0
-        while i < len(words):
-            chunk = words[i:i+3]
-            start = chunk[0]['start']
-            end = chunk[-1]['end']
-            text = ' '.join(w['word'].strip() for w in chunk)
-            if not text:
-                i += len(chunk)
-                continue
-            sh = int(start // 3600)
-            sm = int((start % 3600) // 60)
-            ss = start % 60
-            eh = int(end // 3600)
-            em = int((end % 3600) // 60)
-            es = end % 60
-            f.write(f'{idx}\\n')
-            f.write(f'{sh:02d}:{sm:02d}:{ss:06.3f} --> {eh:02d}:{em:02d}:{es:06.3f}\\n'.replace('.',','))
-            f.write(f'{text}\\n\\n')
-            idx += 1
-            i += len(chunk)
+    for i, seg in enumerate(result['segments']):
+        start = seg['start']
+        end = seg['end']
+        text = seg['text'].strip()
+        sh = int(start // 3600)
+        sm = int((start % 3600) // 60)
+        ss = start % 60
+        eh = int(end // 3600)
+        em = int((end % 3600) // 60)
+        es = end % 60
+        f.write(f'{i+1}\\n')
+        f.write(f'{sh:02d}:{sm:02d}:{ss:06.3f} --> {eh:02d}:{em:02d}:{es:06.3f}\\n'.replace('.',','))
+        f.write(f'{text}\\n\\n')
 print('DONE')
 `;
 
@@ -148,8 +121,7 @@ print('DONE')
 }
 
 function parseSrt(srtContent) {
-  const normalized = srtContent.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-  const blocks = normalized.trim().split(/\n\n+/);
+  const blocks = srtContent.trim().split(/\n\n+/);
   const entries = [];
   for (const block of blocks) {
     const lines = block.split('\n');
@@ -164,121 +136,13 @@ function parseSrt(srtContent) {
   return entries;
 }
 
-function parseTime(timeStr) {
-  const parts = timeStr.match(/(\d{2}):(\d{2}):(\d{2})[,.](\d{3})/);
-  if (!parts) return 0;
-  return parseInt(parts[1]) * 3600 + parseInt(parts[2]) * 60 + parseInt(parts[3]) + parseInt(parts[4]) / 1000;
-}
-
-function formatTime(seconds) {
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  const s = Math.floor(seconds % 60);
-  const ms = Math.round((seconds % 1) * 1000);
-  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')},${String(ms).padStart(3, '0')}`;
-}
-
-function refineSrt(srtContent) {
-  const entries = parseSrt(srtContent);
-  if (entries.length === 0) return srtContent;
-
-  const MAX_DURATION = 4.0;
-  const MAX_WORDS = 6;
-  const GAP = 0.1;
-  const result = [];
-
-  for (const entry of entries) {
-    const timeParts = entry.time.match(/(\d{2}:\d{2}:\d{2}[,.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,.]\d{3})/);
-    if (!timeParts) {
-      result.push(entry);
-      continue;
-    }
-
-    const start = parseTime(timeParts[1]);
-    const end = parseTime(timeParts[2]);
-    const duration = end - start;
-    const words = entry.text.split(/\s+/);
-
-    if (duration <= MAX_DURATION && words.length <= MAX_WORDS) {
-      result.push(entry);
-      continue;
-    }
-
-    const chunks = [];
-    if (duration > MAX_DURATION && words.length > MAX_WORDS) {
-      const wordCount = words.length;
-      const chunksNeeded = Math.max(Math.ceil(duration / MAX_DURATION), Math.ceil(wordCount / MAX_WORDS));
-      const wordsPerChunk = Math.ceil(wordCount / chunksNeeded);
-      const timePerChunk = duration / chunksNeeded;
-
-      for (let i = 0; i < words.length; i += wordsPerChunk) {
-        const chunkWords = words.slice(i, i + wordsPerChunk);
-        chunks.push({
-          words: chunkWords,
-          start: start + (i / wordCount) * duration,
-          end: start + ((i + chunkWords.length) / wordCount) * duration
-        });
-      }
-    } else if (duration > MAX_DURATION) {
-      const chunksNeeded = Math.ceil(duration / MAX_DURATION);
-      const timePerChunk = duration / chunksNeeded;
-      const wordsPerChunk = Math.ceil(words.length / chunksNeeded);
-
-      for (let i = 0; i < words.length; i += wordsPerChunk) {
-        const chunkWords = words.slice(i, i + wordsPerChunk);
-        const chunkStart = start + (i / words.length) * duration;
-        const chunkEnd = start + ((i + chunkWords.length) / words.length) * duration;
-        chunks.push({ words: chunkWords, start: chunkStart, end: chunkEnd });
-      }
-    } else {
-      const chunksNeeded = Math.ceil(words.length / MAX_WORDS);
-      const wordsPerChunk = Math.ceil(words.length / chunksNeeded);
-
-      for (let i = 0; i < words.length; i += wordsPerChunk) {
-        const chunkWords = words.slice(i, i + wordsPerChunk);
-        const chunkStart = start + (i / words.length) * duration;
-        const chunkEnd = start + ((i + chunkWords.length) / words.length) * duration;
-        chunks.push({ words: chunkWords, start: chunkStart, end: chunkEnd });
-      }
-    }
-
-    for (const chunk of chunks) {
-      result.push({
-        index: 0,
-        time: `${formatTime(chunk.start)} --> ${formatTime(chunk.end)}`,
-        text: chunk.words.join(' ')
-      });
-    }
-  }
-
-  let lastEnd = 0;
-  for (const entry of result) {
-    const timeParts = entry.time.match(/(\d{2}:\d{2}:\d{2}[,.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,.]\d{3})/);
-    if (timeParts) {
-      let start = parseTime(timeParts[1]);
-      const end = parseTime(timeParts[2]);
-
-      if (start < lastEnd) {
-        start = lastEnd + GAP;
-      }
-
-      entry.time = `${formatTime(start)} --> ${formatTime(end)}`;
-      lastEnd = end;
-    }
-  }
-
-  return result.map((e, i) =>
-    (i + 1) + '\n' + e.time + '\n' + e.text
-  ).join('\n\n');
-}
-
 function srtToVtt(srtContent) {
   let vtt = 'WEBVTT\n\n';
   vtt += srtContent.replace(/(\d{2}):(\d{2}):(\d{2}),(\d{3})/g, '$1:$2:$3.$4');
   return vtt;
 }
 
-async function translateSrt(srtContent, targetLang, onProgress) {
+async function translateSrt(srtContent, targetLang) {
   console.log('Traduciendo subtitulos...');
   const entries = parseSrt(srtContent);
   const toLang = targetLang || 'es';
@@ -290,17 +154,14 @@ async function translateSrt(srtContent, targetLang, onProgress) {
       const res = await translate(entry.text, { from: 'auto', to: toLang });
       translated.push({ ...entry, text: res.text });
     } catch (e) {
-      console.log('Error traduciendo entrada ' + (i+1) + ':', e.message);
       translated.push(entry);
     }
-    if (onProgress) {
-      onProgress(i + 1, entries.length, entry.text.substring(0, 30));
-    }
+    process.stdout.write('\rTraduciendo subtitulos: ' + (i + 1) + '/' + entries.length);
     if (i < entries.length - 1) {
       await new Promise(r => setTimeout(r, 600));
     }
   }
-  console.log('Traduccion completada: ' + translated.length + ' entradas');
+  console.log('\n');
 
   return translated.map((e, i) =>
     (i + 1) + '\n' + e.time + '\n' + e.text
@@ -344,6 +205,5 @@ module.exports = {
   embedSubtitles,
   parseSrt,
   srtToVtt,
-  detectLanguage,
-  refineSrt
+  detectLanguage
 };

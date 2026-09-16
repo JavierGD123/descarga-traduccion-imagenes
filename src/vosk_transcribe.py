@@ -1,10 +1,10 @@
 import sys, os, json, wave, subprocess
+from vosk import Model, KaldiRecognizer
 
 MODEL_DIR = r'C:\Proyectos\descarga-traduccion-imagenes\models\vosk'
 AUDIO_FILE = sys.argv[1] if len(sys.argv) > 1 else ''
 OUTPUT_SRT = sys.argv[2] if len(sys.argv) > 2 else ''
-WORDS_PER_LINE = 3
-FFMPEG_PATH = r'C:\Proyectos\descarga-traduccion-imagenes\tools\ffmpeg-9.0.1-essentials_build\bin\ffmpeg.exe'
+WORDS_PER_LINE = 7
 
 if not AUDIO_FILE or not OUTPUT_SRT:
     print('Usage: vosk_transcribe.py <audio.wav> <output.srt>')
@@ -16,9 +16,8 @@ if not os.path.exists(AUDIO_FILE):
 
 if not os.path.exists(MODEL_DIR):
     print(f'Model not found at {MODEL_DIR}')
+    print('Download from https://alphacephei.com/vosk/models')
     sys.exit(1)
-
-from vosk import Model, KaldiRecognizer
 
 model = Model(MODEL_DIR)
 
@@ -26,7 +25,7 @@ wf = wave.open(AUDIO_FILE, 'rb')
 if wf.getnchannels() != 1 or wf.getsampwidth() != 2 or wf.getframerate() != 16000:
     converted = AUDIO_FILE.replace('.wav', '_16k.wav')
     subprocess.run([
-        FFMPEG_PATH,
+        r'C:\Proyectos\descarga-traduccion-imagenes\tools\ffmpeg-9.0.1-essentials_build\bin\ffmpeg.exe',
         '-i', AUDIO_FILE, '-ar', '16000', '-ac', '1', '-y', converted
     ], capture_output=True)
     wf.close()
