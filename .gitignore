@@ -1,0 +1,8 @@
+node_modules/
+downloads/
+uploads/
+saved/
+temp/
+tools/
+.env
+*.log

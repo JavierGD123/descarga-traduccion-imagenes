@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Descargador de Imagenes y Subtitulos</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Descargador de Imagenes y Subtitulos</h1>
+      <p class="subtitle">Descarga imagenes, traduce textos o agrega subtitulos a videos</p>
+    </header>
+
+    <div class="tabs">
+      <button class="tab active" onclick="switchTab('images')">Descargar Imagenes</button>
+      <button class="tab" onclick="switchTab('subtitles')">Subtitulos de Video</button>
+    </div>
+
+    <!-- ========== SECCION IMAGENES ========== -->
+    <div id="tab-images" class="tab-content active">
+      <div class="url-input">
+        <input type="url" id="urlInput" placeholder="https://ejemplo.com/pagina-con-imagenes" required>
+        <button id="processBtn" onclick="processUrl()">
+          <span class="btn-text">Procesar</span>
+          <span class="btn-loader" style="display:none;"><span class="spinner"></span> Procesando...</span>
+        </button>
+      </div>
+      <label class="checkbox-label">
+        <input type="checkbox" id="saveImagesCheck">
+        <span>Guardar imagenes y archivos en disco</span>
+      </label>
+    </div>
+
+    <!-- ========== SECCION SUBTITULOS ========== -->
+    <div id="tab-subtitles" class="tab-content" style="display:none;">
+
+      <!-- Paso 1: Cargar video -->
+      <div id="step-load" class="subtitle-step">
+        <div class="source-option">
+          <h3>Desde enlace</h3>
+          <div class="url-input">
+            <input type="url" id="videoUrlInput" placeholder="https://youtube.com/watch?v=...">
+            <button id="downloadBtn" onclick="downloadVideoFromUrl()">
+              <span class="btn-text">Cargar Video</span>
+              <span class="btn-loader" style="display:none;"><span class="spinner"></span> Descargando...</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="divider"><span>o</span></div>
+
+        <div class="source-option">
+          <h3>Desde archivo local</h3>
+          <div class="file-upload-area" id="fileUploadArea">
+            <input type="file" id="videoFileInput" accept="video/*" hidden>
+            <div class="file-upload-content" onclick="document.getElementById('videoFileInput').click()">
+              <div class="file-icon">Video</div>
+              <p>Haz clic para seleccionar un video</p>
+              <p class="file-hint">MP4, MKV, AVI, MOV, WebM (max 2GB)</p>
+            </div>
+            <div class="file-selected" id="fileSelected" style="display:none;">
+              <span id="fileName"></span>
+              <button class="btn-remove" onclick="removeFile()">X</button>
+            </div>
+          </div>
+          <button id="uploadBtn" onclick="uploadVideoFile()" style="display:none; margin-top:10px; width:100%;">
+            <span class="btn-text">Cargar Video</span>
+            <span class="btn-loader" style="display:none;"><span class="spinner"></span> Subiendo...</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Paso 2: Video + controles (oculto hasta cargar video) -->
+      <div id="step-work" class="subtitle-step" style="display:none;">
+        <div class="video-preview">
+          <div class="video-header">
+            <h3 id="videoTitle">Video Cargado</h3>
+            <div class="subtitle-controls">
+              <label>Subtitulos:</label>
+              <select id="subtitleTrack" onchange="changeSubtitleTrack()">
+                <option value="off">Sin subtitulos</option>
+                <option value="original" id="optOriginal" style="display:none;">Original</option>
+                <option value="translated" id="optTranslated" style="display:none;">Traducido</option>
+              </select>
+            </div>
+          </div>
+          <div class="video-wrapper">
+            <video id="videoPlayer" controls></video>
+          </div>
+        </div>
+
+        <!-- Controles de generacion -->
+        <div class="controls-panel">
+          <div class="control-row">
+            <div class="control-group">
+              <label>Motor de transcripcion:</label>
+              <select id="engineSelect">
+                <option value="whisper">Whisper (mas preciso)</option>
+                <option value="vosk">LibVosk (mas rapido, offline)</option>
+              </select>
+            </div>
+            <button id="generateBtn" onclick="generateSubtitles()">
+              <span class="btn-text">Generar Subtitulos</span>
+              <span class="btn-loader" style="display:none;"><span class="spinner"></span> Transcribiendo...</span>
+            </button>
+          </div>
+
+          <div id="translatePanel" class="control-row" style="display:none;">
+            <div class="control-group">
+              <label>Traducir a:</label>
+              <select id="targetLang">
+                <option value="es" selected>Espanol (Latinoamerica)</option>
+                <option value="en">Ingles</option>
+                <option value="pt">Portugues</option>
+                <option value="fr">Frances</option>
+                <option value="de">Aleman</option>
+                <option value="it">Italiano</option>
+                <option value="ja">Japones</option>
+                <option value="ko">Coreano</option>
+                <option value="zh">Chino</option>
+                <option value="ru">Ruso</option>
+                <option value="ar">Arabe</option>
+              </select>
+            </div>
+            <button id="translateBtn" onclick="translateSubtitles()">
+              <span class="btn-text">Traducir Subtitulos</span>
+              <span class="btn-loader" style="display:none;"><span class="spinner"></span> Traduciendo...</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Info de resultados -->
+        <div id="detectResult" class="detect-result" style="display:none;">
+          <div class="detect-info">
+            <div class="detect-item">
+              <span class="detect-label">Idioma detectado:</span>
+              <span id="detectedLang" class="detect-value"></span>
+            </div>
+            <div class="detect-item">
+              <span class="detect-label">Subtitulos:</span>
+              <span id="subtitleCount" class="detect-value"></span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Botones de exportacion -->
+        <div id="exportPanel" class="export-panel" style="display:none;">
+          <h3>Exportar</h3>
+          <div class="export-buttons">
+            <a id="exportSrtOriginal" href="#" class="btn-export" download style="display:none;">
+              <span class="export-icon">SRT</span>
+              <span>Original</span>
+            </a>
+            <a id="exportVttOriginal" href="#" class="btn-export" download style="display:none;">
+              <span class="export-icon">VTT</span>
+              <span>Original</span>
+            </a>
+            <a id="exportSrtTranslated" href="#" class="btn-export" download style="display:none;">
+              <span class="export-icon">SRT</span>
+              <span>Traducido</span>
+            </a>
+            <a id="exportVttTranslated" href="#" class="btn-export" download style="display:none;">
+              <span class="export-icon">VTT</span>
+              <span>Traducido</span>
+            </a>
+            <button id="exportVideoBtn" class="btn-export btn-export-video" onclick="exportVideoWithSubs()" style="display:none;">
+              <span class="export-icon">MP4</span>
+              <span>Video con Subtitulos</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ========== PROGRESO ========== -->
+    <div id="progressArea" class="progress-area" style="display:none;">
+      <div class="progress-header">
+        <span id="progressMsg" class="progress-msg">Procesando...</span>
+        <span id="progressStep" class="progress-step"></span>
+      </div>
+      <div class="progress-track">
+        <div id="progressBar" class="progress-fill"></div>
+      </div>
+      <div id="progressDetail" class="progress-detail"></div>
+    </div>
+
+    <div id="error" class="error" style="display:none;">
+      <div class="error-text"></div>
+    </div>
+
+    <!-- ========== RESULTADOS IMAGENES ========== -->
+    <div id="results" class="results" style="display:none;">
+      <div class="results-header">
+        <h2>Resultados</h2>
+        <div class="download-buttons">
+          <a id="downloadPptx" href="#" class="btn-download pptx" download>Descargar PowerPoint</a>
+          <a id="downloadPdf" href="#" class="btn-download pdf" download>Descargar PDF</a>
+        </div>
+      </div>
+      <div class="stats">
+        <div class="stat">
+          <span class="stat-number" id="imageCount">0</span>
+          <span class="stat-label">Imagenes</span>
+        </div>
+        <div class="stat">
+          <span class="stat-number" id="translationCount">0</span>
+          <span class="stat-label">Traducciones</span>
+        </div>
+        <div class="stat">
+          <span class="stat-number" id="editCount">0</span>
+          <span class="stat-label">Textos editados</span>
+        </div>
+      </div>
+      <h3>Vista previa: Original vs Editada</h3>
+      <div id="imageGrid" class="preview-grid"></div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
