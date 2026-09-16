@@ -10,7 +10,7 @@ const { generatePptx } = require('./src/pptx');
 const { generatePdf } = require('./src/pdf');
 const {
   downloadVideo, extractAudio, transcribeAudio,
-  translateSrt, embedSubtitles, parseSrt, srtToVtt, detectLanguage
+  translateSrt, embedSubtitles, parseSrt, srtToVtt, detectLanguage, refineSrt
 } = require('./src/subtitle');
 
 const app = express();
@@ -22,6 +22,7 @@ fs.mkdirSync(TEMP_DIR, { recursive: true });
 fs.mkdirSync(SAVED_DIR, { recursive: true });
 
 const sseClients = new Map();
+const jobStartTime = new Map();
 
 function createSSE(jobId, res) {
   res.writeHead(200, {
@@ -35,10 +36,15 @@ function createSSE(jobId, res) {
   res.on('close', () => sseClients.delete(jobId));
 }
 
-function sendProgress(jobId, step, total, message, detail) {
+function sendProgress(jobId, step, total, message, detail, stepName) {
   const client = sseClients.get(jobId);
-  const payload = JSON.stringify({ step, total, message, detail: detail || '' });
-  console.log('[' + jobId + '] ' + step + '/' + total + ': ' + message + (detail ? ' (' + detail + ')' : ''));
+  const now = Date.now();
+  if (!jobStartTime.has(jobId)) {
+    jobStartTime.set(jobId, now);
+  }
+  const elapsed = now - jobStartTime.get(jobId);
+  const payload = JSON.stringify({ step, total, message, detail: detail || '', elapsed, stepName: stepName || '' });
+  console.log('[' + jobId + '] ' + step + '/' + total + ': ' + message + (detail ? ' (' + detail + ')' : '') + ' [' + Math.round(elapsed / 1000) + 's]');
   if (client) {
     client.write('data: ' + payload + '\n\n');
   }
@@ -86,37 +92,37 @@ app.post('/api/process', async (req, res) => {
 
   try {
     await waitMs(500);
-    sendProgress(jobId, 1, TOTAL, 'Conectando con la pagina web...');
+    sendProgress(jobId, 1, TOTAL, 'Conectando con la pagina web...', '', 'Scraping');
     const images = await scrapeImages(url, workDir);
     if (images.length === 0) {
       fs.rmSync(workDir, { recursive: true, force: true });
       return res.status(404).json({ error: 'No se encontraron imagenes' });
     }
 
-    sendProgress(jobId, 2, TOTAL, 'Leyendo texto de ' + images.length + ' imagenes (OCR)...');
+    sendProgress(jobId, 2, TOTAL, 'Leyendo texto de ' + images.length + ' imagenes (OCR)...', '', 'OCR');
     const ocrResults = await extractTextFromImages(images, (i, total, filename) => {
-      sendProgress(jobId, 2, TOTAL, 'OCR: imagen ' + i + ' de ' + total, filename);
+      sendProgress(jobId, 2, TOTAL, 'OCR: imagen ' + i + ' de ' + total, filename, 'OCR');
     });
     const withText = ocrResults.filter(r => r.text.length > 0).length;
 
-    sendProgress(jobId, 3, TOTAL, 'Traduciendo ' + withText + ' imagenes con texto...');
+    sendProgress(jobId, 3, TOTAL, 'Traduciendo ' + withText + ' imagenes con texto...', '', 'Traduccion');
     const translatedResults = await translateTexts(ocrResults, (i, total, filename) => {
-      sendProgress(jobId, 3, TOTAL, 'Traduccion: imagen ' + i + ' de ' + total, filename);
+      sendProgress(jobId, 3, TOTAL, 'Traduccion: imagen ' + i + ' de ' + total, filename, 'Traduccion');
     });
     const translated = translatedResults.filter(r => r.originalText !== r.translatedText).length;
 
-    sendProgress(jobId, 4, TOTAL, 'Editando imagenes: borrando ingles, agregando espanol...');
+    sendProgress(jobId, 4, TOTAL, 'Editando imagenes: borrando ingles, agregando espanol...', '', 'Edicion');
     const editedResults = await editMultipleImages(ocrResults, translatedResults, editedDir, (i, total, filename) => {
-      sendProgress(jobId, 4, TOTAL, 'Edicion: imagen ' + i + ' de ' + total, filename);
+      sendProgress(jobId, 4, TOTAL, 'Edicion: imagen ' + i + ' de ' + total, filename, 'Edicion');
     });
 
     const editedImages = editedResults.map(r => r.editedPath);
     const totalEdits = editedResults.reduce((sum, r) => sum + (r.count || 0), 0);
 
-    sendProgress(jobId, 5, TOTAL, 'Generando PowerPoint con ' + images.length + ' paginas...');
+    sendProgress(jobId, 5, TOTAL, 'Generando PowerPoint con ' + images.length + ' paginas...', '', 'PowerPoint');
     await generatePptx(editedImages, translatedResults, workDir);
 
-    sendProgress(jobId, 6, TOTAL, 'Generando PDF...');
+    sendProgress(jobId, 6, TOTAL, 'Generando PDF...', '', 'PDF');
     await generatePdf(editedImages, translatedResults, workDir);
 
     const finalDir = path.join(SAVED_DIR, jobId);
@@ -227,9 +233,9 @@ app.post('/api/subtitle/download', async (req, res) => {
 
   try {
     fs.mkdirSync(workDir, { recursive: true });
-    sendProgress(jobId, 1, 2, 'Descargando video desde URL...');
+    sendProgress(jobId, 1, 2, 'Descargando video desde URL...', '', 'Descarga');
     const videoPath = await downloadVideo(url, workDir);
-    sendProgress(jobId, 2, 2, 'Video descargado');
+    sendProgress(jobId, 2, 2, 'Video descargado', '', 'Listo');
 
     const videoFiles = fs.readdirSync(workDir).filter(f => /^video\.\w+$/.test(f));
     const videoUrl = '/api/video/' + jobId;
@@ -308,24 +314,27 @@ app.post('/api/subtitle/generate', async (req, res) => {
   const workDir = path.join(TEMP_DIR, jobId);
   if (!fs.existsSync(workDir)) return res.status(404).json({ error: 'Job no encontrado' });
 
-  const TOTAL = 3;
+  const TOTAL = 4;
 
   try {
-    sendProgress(jobId, 1, TOTAL, 'Extrayendo audio del video...');
+    sendProgress(jobId, 1, TOTAL, 'Extrayendo audio del video...', '', 'Audio');
     const videoFiles = fs.readdirSync(workDir).filter(f => /^video\.\w+$/.test(f));
     if (videoFiles.length === 0) throw new Error('No se encontro el video');
     const audioPath = await extractAudio(path.join(workDir, videoFiles[0]), workDir);
 
     const engineName = engine === 'vosk' ? 'LibVosk' : 'Whisper';
-    sendProgress(jobId, 2, TOTAL, 'Transcribiendo con ' + engineName + '...');
-    const srtContent = await transcribeAudio(audioPath, engine);
+    sendProgress(jobId, 2, TOTAL, 'Transcribiendo con ' + engineName + '...', '', 'Transcripcion');
+    let srtContent = await transcribeAudio(audioPath, engine);
+
+    sendProgress(jobId, 3, TOTAL, 'Ajustando timing de subtitulos...', '', 'Timing');
+    srtContent = refineSrt(srtContent);
 
     const entries = parseSrt(srtContent);
     const detectedLang = detectLanguage(srtContent);
 
     fs.writeFileSync(path.join(workDir, 'subtitles.srt'), srtContent, 'utf8');
 
-    sendProgress(jobId, 3, TOTAL, 'Subtitulos generados: ' + entries.length + ' bloques');
+    sendProgress(jobId, 4, TOTAL, 'Subtitulos generados: ' + entries.length + ' bloques', '', 'Listo');
 
     res.json({
       success: true, jobId, detectedLang,
@@ -344,11 +353,14 @@ app.post('/api/subtitle/translate', async (req, res) => {
   if (!jobId || !srtContent) return res.status(400).json({ error: 'Datos requeridos' });
 
   const workDir = path.join(TEMP_DIR, jobId);
+  if (!fs.existsSync(workDir)) fs.mkdirSync(workDir, { recursive: true });
   const TOTAL = 2;
 
   try {
-    sendProgress(jobId, 1, TOTAL, 'Traduciendo subtitulos...');
-    const finalSrt = await translateSrt(srtContent, targetLang || 'es');
+    sendProgress(jobId, 1, TOTAL, 'Traduciendo subtitulos...', '', 'Traduccion');
+    const finalSrt = await translateSrt(srtContent, targetLang || 'es', (i, total, text) => {
+      sendProgress(jobId, 1, TOTAL, 'Traduciendo: ' + i + ' de ' + total, text, 'Traduccion');
+    });
 
     fs.writeFileSync(path.join(workDir, 'translated.srt'), finalSrt, 'utf8');
 

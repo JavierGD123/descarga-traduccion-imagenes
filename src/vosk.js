@@ -7,8 +7,7 @@ const FFMPEG_DIR = path.join(__dirname, '..', 'tools', 'ffmpeg-9.0.1-essentials_
 const PYTHON_PATH = 'python';
 const VOSK_SCRIPT = path.join(__dirname, 'vosk_transcribe.py');
 const MODEL_DIR = path.join(__dirname, '..', 'models', 'vosk');
-const MODEL_URL_ES = 'https://alphacephei.com/vosk/models/vosk-model-small-es-0.42.zip';
-const MODEL_URL_EN = 'https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip';
+const MODEL_URL = 'https://alphacephei.com/vosk/models/vosk-model-small-es-0.42.zip';
 
 function runCommand(cmd, args, opts = {}) {
   return new Promise((resolve, reject) => {
@@ -34,22 +33,23 @@ async function ensureModel() {
     if (files.length > 3) return;
   }
 
-  console.log('Descargando modelo Vosk (espanol)...');
+  console.log('Descargando modelo Vosk (espanol, ~50MB)...');
   fs.mkdirSync(MODEL_DIR, { recursive: true });
 
-  const zipPath = path.join(path.dirname(MODEL_DIR), 'model.zip');
+  const modelsParentDir = path.dirname(MODEL_DIR);
+  const zipPath = path.join(modelsParentDir, 'model.zip');
+  const extractDir = path.join(modelsParentDir, 'model_extract');
 
-  await runCommand(FFMPEG_PATH, []);
-  const curlArgs = ['-L', '-o', zipPath, MODEL_URL_ES];
-  try {
-    await runCommand('curl', curlArgs);
-  } catch (e) {
-    const psCmd = `Invoke-WebRequest -Uri "${MODEL_URL_ES}" -OutFile "${zipPath}"`;
-    await runCommand('powershell', ['-Command', psCmd]);
+  const psDownload = `$ProgressPreference = 'SilentlyContinue'; Invoke-WebRequest -Uri '${MODEL_URL}' -OutFile '${zipPath}'`;
+  await runCommand('powershell', ['-Command', psDownload]);
+
+  if (!fs.existsSync(zipPath) || fs.statSync(zipPath).size < 1000000) {
+    throw new Error('Error descargando modelo Vosk');
   }
 
-  const extractDir = path.join(path.dirname(MODEL_DIR), 'model_extract');
-  await runCommand('powershell', ['-Command', `Expand-Archive -Path "${zipPath}" -DestinationPath "${extractDir}" -Force`]);
+  console.log('Extrayendo modelo...');
+  fs.mkdirSync(extractDir, { recursive: true });
+  await runCommand('powershell', ['-Command', `Expand-Archive -Path '${zipPath}' -DestinationPath '${extractDir}' -Force`]);
 
   const extractedDirs = fs.readdirSync(extractDir).filter(f =>
     fs.statSync(path.join(extractDir, f)).isDirectory()
@@ -57,7 +57,7 @@ async function ensureModel() {
 
   if (extractedDirs.length > 0) {
     const extractedPath = path.join(extractDir, extractedDirs[0]);
-    fs.rmSync(MODEL_DIR, { recursive: true, force: true });
+    if (fs.existsSync(MODEL_DIR)) fs.rmSync(MODEL_DIR, { recursive: true, force: true });
     fs.renameSync(extractedPath, MODEL_DIR);
   }
 
@@ -76,8 +76,8 @@ async function transcribeWithVosk(audioPath) {
   console.log('Transcribiendo con Vosk...');
   const result = await runCommand(PYTHON_PATH, [VOSK_SCRIPT, audioPath, srtPath]);
 
-  if (result && result.startsWith('DONE:')) {
-    const count = parseInt(result.split(':')[1]);
+  if (result && result.trim().startsWith('DONE:')) {
+    const count = parseInt(result.trim().split(':')[1]);
     console.log('Vosk: ' + count + ' bloques de texto');
   }
 

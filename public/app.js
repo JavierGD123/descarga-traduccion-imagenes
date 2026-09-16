@@ -27,7 +27,7 @@ function startListening(jobId) {
   currentEventSource = new EventSource('/api/progress/' + jobId);
   currentEventSource.onmessage = function(e) {
     var data = JSON.parse(e.data);
-    showProgress(data.step, data.total, data.message, data.detail);
+    showProgress(data.step, data.total, data.message, data.detail, data.elapsed, data.stepName);
   };
   currentEventSource.onerror = function() {
     setTimeout(function() {
@@ -43,7 +43,14 @@ function stopListening() {
   }
 }
 
-function showProgress(step, total, message, detail) {
+function formatTime(ms) {
+  var totalSec = Math.floor(ms / 1000);
+  var min = Math.floor(totalSec / 60);
+  var sec = totalSec % 60;
+  return String(min).padStart(2, '0') + ':' + String(sec).padStart(2, '0');
+}
+
+function showProgress(step, total, message, detail, elapsed, stepName) {
   var el = document.getElementById('progressArea');
   el.style.display = 'block';
 
@@ -52,6 +59,23 @@ function showProgress(step, total, message, detail) {
   document.getElementById('progressMsg').textContent = message || 'Procesando...';
   document.getElementById('progressDetail').textContent = detail || '';
   document.getElementById('progressStep').textContent = pct + '%';
+
+  if (stepName) {
+    document.getElementById('progressStepName').textContent = stepName;
+    document.getElementById('progressStepName').style.display = 'inline';
+  } else {
+    document.getElementById('progressStepName').style.display = 'none';
+  }
+
+  if (elapsed) {
+    document.getElementById('progressElapsed').textContent = formatTime(elapsed);
+    if (step > 0 && step < total) {
+      var eta = Math.round((elapsed / step) * (total - step));
+      document.getElementById('progressEta').textContent = '~' + formatTime(eta) + ' restante';
+    } else {
+      document.getElementById('progressEta').textContent = '';
+    }
+  }
 }
 
 function hideProgress() {
@@ -268,7 +292,25 @@ function showVideoPlayer(data) {
   document.getElementById('step-work').style.display = 'block';
 
   var video = document.getElementById('videoPlayer');
+
+  while (video.firstChild) video.removeChild(video.firstChild);
+
   video.src = data.videoUrl;
+
+  var track1 = document.createElement('track');
+  track1.id = 'originalTrack';
+  track1.kind = 'subtitles';
+  track1.label = 'Original';
+  track1.srclang = 'en';
+  video.appendChild(track1);
+
+  var track2 = document.createElement('track');
+  track2.id = 'translatedTrack';
+  track2.kind = 'subtitles';
+  track2.label = 'Traducido';
+  track2.srclang = 'es';
+  video.appendChild(track2);
+
   video.load();
 
   document.getElementById('videoTitle').textContent = data.filename || 'Video Cargado';
@@ -314,11 +356,23 @@ async function generateSubtitles() {
     var vtt = srtToVtt(data.srtContent);
     var blob = new Blob([vtt], { type: 'text/vtt' });
     var url = URL.createObjectURL(blob);
-    document.getElementById('originalTrack').src = url;
-    document.getElementById('optOriginal').style.display = 'block';
+
+    var video = document.getElementById('videoPlayer');
+    var origTrack = document.getElementById('originalTrack');
+    if (origTrack) {
+      origTrack.src = url;
+    } else {
+      var t = document.createElement('track');
+      t.id = 'originalTrack';
+      t.kind = 'subtitles';
+      t.label = 'Original';
+      t.srclang = 'en';
+      t.src = url;
+      video.appendChild(t);
+    }
 
     document.getElementById('subtitleTrack').value = 'original';
-    document.getElementById('optOriginal').selected = true;
+    document.getElementById('optOriginal').style.display = 'block';
     changeSubtitleTrack();
 
     document.getElementById('translatePanel').style.display = 'flex';
@@ -350,6 +404,7 @@ async function translateSubtitles() {
     showProgress(0, 2, 'Traduciendo subtitulos...', '');
     startListening(currentJobId);
 
+    console.log('[Frontend] Translating. jobId:', currentJobId, 'srtLength:', currentSrt.length, 'lang:', targetLang);
     var response = await fetch('/api/subtitle/translate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -365,11 +420,23 @@ async function translateSubtitles() {
     var vtt = srtToVtt(data.srtContent);
     var blob = new Blob([vtt], { type: 'text/vtt' });
     var url = URL.createObjectURL(blob);
-    document.getElementById('translatedTrack').src = url;
-    document.getElementById('optTranslated').style.display = 'block';
+
+    var video = document.getElementById('videoPlayer');
+    var transTrack = document.getElementById('translatedTrack');
+    if (transTrack) {
+      transTrack.src = url;
+    } else {
+      var t = document.createElement('track');
+      t.id = 'translatedTrack';
+      t.kind = 'subtitles';
+      t.label = 'Traducido';
+      t.srclang = 'es';
+      t.src = url;
+      video.appendChild(t);
+    }
 
     document.getElementById('subtitleTrack').value = 'translated';
-    document.getElementById('optTranslated').selected = true;
+    document.getElementById('optTranslated').style.display = 'block';
     changeSubtitleTrack();
 
     document.getElementById('exportSrtTranslated').href = '/api/subtitle/export-srt/' + currentJobId + '/translated';
@@ -423,6 +490,7 @@ async function exportVideoWithSubs() {
 
 function changeSubtitleTrack() {
   var video = document.getElementById('videoPlayer');
+  if (!video) return;
   var tracks = video.textTracks;
   var val = document.getElementById('subtitleTrack').value;
 

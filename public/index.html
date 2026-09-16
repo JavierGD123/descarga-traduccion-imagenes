@@ -87,7 +87,10 @@
             </div>
           </div>
           <div class="video-wrapper">
-            <video id="videoPlayer" controls></video>
+            <video id="videoPlayer" controls>
+              <track id="originalTrack" kind="subtitles" label="Original" srclang="en">
+              <track id="translatedTrack" kind="subtitles" label="Traducido" srclang="es">
+            </video>
           </div>
         </div>
 
@@ -177,13 +180,22 @@
     <!-- ========== PROGRESO ========== -->
     <div id="progressArea" class="progress-area" style="display:none;">
       <div class="progress-header">
-        <span id="progressMsg" class="progress-msg">Procesando...</span>
+        <div class="progress-step-info">
+          <span id="progressStepName" class="progress-step-name"></span>
+          <span id="progressMsg" class="progress-msg">Procesando...</span>
+        </div>
         <span id="progressStep" class="progress-step"></span>
       </div>
       <div class="progress-track">
         <div id="progressBar" class="progress-fill"></div>
       </div>
-      <div id="progressDetail" class="progress-detail"></div>
+      <div class="progress-stats">
+        <span id="progressDetail" class="progress-detail"></span>
+        <div class="progress-time">
+          <span id="progressElapsed" class="progress-elapsed"></span>
+          <span id="progressEta" class="progress-eta"></span>
+        </div>
+      </div>
     </div>
 
     <div id="error" class="error" style="display:none;">
