@@ -8,18 +8,41 @@ puppeteer.use(StealthPlugin());
 
 const COMIC_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.webp'];
 
+const CHROME_PROFILE_DIR = path.join(__dirname, '..', 'temp', 'chrome-profile');
+
+async function launchBrowser() {
+  const baseArgs = [
+    '--no-sandbox',
+    '--disable-setuid-sandbox',
+    '--disable-dev-shm-usage',
+    '--disable-blink-features=AutomationControlled'
+  ];
+
+  const attempts = [
+    { headless: 'new', args: baseArgs },
+    { headless: 'new', args: baseArgs, channel: 'chrome' }
+  ];
+
+  let lastError = null;
+  for (const opts of attempts) {
+    try {
+      return await puppeteer.launch({
+        timeout: 120000,
+        userDataDir: CHROME_PROFILE_DIR,
+        ...opts
+      });
+    } catch (err) {
+      lastError = err;
+      console.log('Intento de lanzar Chrome fallo: ' + err.message);
+    }
+  }
+  throw new Error('No se pudo iniciar Chrome: ' + lastError.message);
+}
+
 async function scrapeImages(url, outputDir) {
   fs.mkdirSync(outputDir, { recursive: true });
 
-  const browser = await puppeteer.launch({
-    headless: 'new',
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-blink-features=AutomationControlled'
-    ]
-  });
+  const browser = await launchBrowser();
 
   try {
     const page = await browser.newPage();
@@ -175,4 +198,4 @@ async function scrapeImages(url, outputDir) {
   }
 }
 
-module.exports = { scrapeImages };
+module.exports = { scrapeImages, launchBrowser };

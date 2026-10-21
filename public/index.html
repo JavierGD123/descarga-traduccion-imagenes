@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Descargador de Imagenes y Subtitulos</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%234f46e5'/><path d='M12 9l12 7-12 7z' fill='%23ffffff'/></svg>">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -27,6 +28,35 @@
           <span class="btn-loader" style="display:none;"><span class="spinner"></span> Procesando...</span>
         </button>
       </div>
+      <div class="control-row" style="margin-bottom: 12px;">
+        <div class="control-group">
+          <label for="imgEngine">Traducir con:</label>
+          <select id="imgEngine" onchange="updateEngineUI()">
+            <option value="ballons|google" selected>BallonsTranslator + Google (rapido, online)</option>
+            <option value="ballons|meta">BallonsTranslator + Meta AI NLLB (como WhatsApp, local)</option>
+            <option value="legacy|google">Clasico (OCR + Google)</option>
+            <option value="legacy|meta">Clasico (OCR + Meta AI NLLB, local)</option>
+          </select>
+        </div>
+        <div class="control-group" id="imgLangGroup">
+          <label for="imgTargetLang">Traducir a:</label>
+          <select id="imgTargetLang">
+            <option value="es" selected>Espanol</option>
+            <option value="en">Ingles</option>
+            <option value="pt">Portugues</option>
+            <option value="fr">Frances</option>
+            <option value="de">Aleman</option>
+            <option value="it">Italiano</option>
+            <option value="ja">Japones</option>
+            <option value="ko">Coreano</option>
+            <option value="zh">Chino</option>
+            <option value="ru">Ruso</option>
+          </select>
+        </div>
+      </div>
+      <div id="metaHint" class="translator-hint" style="display:none;">
+        Traduce con el modelo de IA de Meta en tu PC (NLLB-200, el de WhatsApp). Primera vez: descarga unica de ~2.4GB; despues funciona sin internet y es mas lento en CPU. Asume que el texto original esta en ingles.
+      </div>
       <label class="checkbox-label">
         <input type="checkbox" id="saveImagesCheck">
         <span>Guardar imagenes y archivos en disco</span>
@@ -39,14 +69,41 @@
       <!-- Paso 1: Cargar video -->
       <div id="step-load" class="subtitle-step">
         <div class="source-option">
-          <h3>Desde enlace</h3>
+          <h3>Desde enlace (una o varias URLs)</h3>
+          <textarea id="videoUrlsInput" class="urls-textarea" rows="3" placeholder="https://youtube.com/watch?v=...&#10;https://ejemplo.com/pelicula&#10;https://otro-sitio.com/video"></textarea>
+
+          <div class="mode-row" id="modeRow">
+            <label class="mode-option active" id="modeDownloadLabel">
+              <input type="radio" name="dlMode" value="download" checked onchange="changeMode('download')">
+              <span class="mode-title">Solo descargar</span>
+              <span class="mode-desc">Maxima calidad, sin subtitulos</span>
+            </label>
+            <label class="mode-option" id="modeSubtitlesLabel">
+              <input type="radio" name="dlMode" value="subtitles" onchange="changeMode('subtitles')">
+              <span class="mode-title">Descargar y subtitular</span>
+              <span class="mode-desc">Abre el video en el editor de subtitulos</span>
+            </label>
+          </div>
+
           <div class="url-input">
-            <input type="url" id="videoUrlInput" placeholder="https://youtube.com/watch?v=...">
-            <button id="downloadBtn" onclick="downloadVideoFromUrl()">
-              <span class="btn-text">Cargar Video</span>
+            <button id="downloadBtn" onclick="downloadVideos()" style="width:100%;">
+              <span class="btn-text">Descargar</span>
               <span class="btn-loader" style="display:none;"><span class="spinner"></span> Descargando...</span>
             </button>
           </div>
+          <p class="hint">Una URL por linea: todas se descargan al mismo tiempo, sin limite de cantidad.</p>
+        </div>
+
+        <!-- Lista de descargas en paralelo -->
+        <div id="downloadsPanel" class="downloads-panel" style="display:none;">
+          <div class="downloads-header">
+            <h3>Descargas <span id="downloadsCount" class="downloads-count">0</span></h3>
+            <div class="downloads-actions">
+              <button class="btn-small btn-ghost" id="saveAllBtn" onclick="saveAllDownloads()" style="display:none;">Guardar todo</button>
+              <button class="btn-small btn-ghost" id="clearListBtn" onclick="clearDownloads()">Borrar lista</button>
+            </div>
+          </div>
+          <div id="downloadList" class="download-list"></div>
         </div>
 
         <div class="divider"><span>o</span></div>
@@ -76,8 +133,9 @@
       <div id="step-work" class="subtitle-step" style="display:none;">
         <div class="video-preview">
           <div class="video-header">
+            <button id="backBtn" class="btn-small btn-ghost" onclick="backToLoads()" style="display:none;">&#8592; Descargas</button>
             <h3 id="videoTitle">Video Cargado</h3>
-            <div class="subtitle-controls">
+            <div class="subtitle-controls" id="subtitleControls">
               <label>Subtitulos:</label>
               <select id="subtitleTrack" onchange="changeSubtitleTrack()">
                 <option value="off">Sin subtitulos</option>
@@ -92,7 +150,16 @@
         </div>
 
         <!-- Controles de generacion -->
-        <div class="controls-panel">
+        <div id="controlsPanel" class="controls-panel">
+          <div id="qualityPanel" class="control-row" style="display:none;">
+            <div class="control-group">
+              <label>Calidad del video:</label>
+              <select id="qualitySelect">
+                <option value="best">Mejor calidad disponible</option>
+              </select>
+            </div>
+            <span id="qualityInfo" class="quality-info"></span>
+          </div>
           <div class="control-row">
             <div class="control-group">
               <label>Motor de transcripcion:</label>
@@ -177,13 +244,34 @@
     <!-- ========== PROGRESO ========== -->
     <div id="progressArea" class="progress-area" style="display:none;">
       <div class="progress-header">
-        <span id="progressMsg" class="progress-msg">Procesando...</span>
+        <div class="progress-step-info">
+          <span id="progressStepName" class="progress-step-name"></span>
+          <span id="progressMsg" class="progress-msg">Procesando...</span>
+        </div>
         <span id="progressStep" class="progress-step"></span>
       </div>
       <div class="progress-track">
         <div id="progressBar" class="progress-fill"></div>
       </div>
-      <div id="progressDetail" class="progress-detail"></div>
+      <div class="progress-stats">
+        <span id="progressDetail" class="progress-detail"></span>
+        <div class="progress-time">
+          <span id="progressElapsed" class="progress-elapsed"></span>
+          <span id="progressEta" class="progress-eta"></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ========== VISTA PREVIA EN TIEMPO REAL ========== -->
+    <div id="livePreview" class="live-preview" style="display:none;">
+      <h3>Vista previa en tiempo real</h3>
+      <div id="livePreviewGrid" class="live-preview-grid"></div>
+    </div>
+
+    <!-- ========== LIGHTBOX ========== -->
+    <div id="lightbox" class="lightbox" style="display:none;" onclick="closeLightbox()">
+      <img id="lightboxImg" src="" alt="">
+      <button class="lightbox-close" onclick="closeLightbox()">&times;</button>
     </div>
 
     <div id="error" class="error" style="display:none;">
@@ -193,12 +281,13 @@
     <!-- ========== RESULTADOS IMAGENES ========== -->
     <div id="results" class="results" style="display:none;">
       <div class="results-header">
-        <h2>Resultados</h2>
-        <div class="download-buttons">
+        <h2 id="resultsTitle">Resultados</h2>
+        <div class="download-buttons" id="downloadButtons">
           <a id="downloadPptx" href="#" class="btn-download pptx" download>Descargar PowerPoint</a>
           <a id="downloadPdf" href="#" class="btn-download pdf" download>Descargar PDF</a>
         </div>
       </div>
+      <div id="batchInfo" class="batch-info" style="display:none;"></div>
       <div class="stats">
         <div class="stat">
           <span class="stat-number" id="imageCount">0</span>
@@ -212,6 +301,11 @@
           <span class="stat-number" id="editCount">0</span>
           <span class="stat-label">Textos editados</span>
         </div>
+      </div>
+      <div id="batchActions" class="batch-actions" style="display:none;">
+        <button id="batchContinueBtn" class="btn-batch continue" onclick="runBatchAction('continue')">Continuar</button>
+        <button id="batchRestBtn" class="btn-batch rest" onclick="runBatchAction('rest')" style="display:none;">Traducir el resto</button>
+        <button id="batchStopBtn" class="btn-batch stop" onclick="runBatchAction('stop')" style="display:none;">Detener</button>
       </div>
       <h3>Vista previa: Original vs Editada</h3>
       <div id="imageGrid" class="preview-grid"></div>

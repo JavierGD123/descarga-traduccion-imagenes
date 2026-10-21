@@ -6,11 +6,13 @@ const { scrapeImages } = require('./src/scraper');
 const { extractTextFromImages } = require('./src/ocr');
 const { translateTexts } = require('./src/translator');
 const { editMultipleImages } = require('./src/imageEditor');
+const { translateFolder } = require('./src/ballons');
 const { generatePptx } = require('./src/pptx');
 const { generatePdf } = require('./src/pdf');
 const {
-  downloadVideo, extractAudio, transcribeAudio,
-  translateSrt, embedSubtitles, parseSrt, srtToVtt, detectLanguage
+  downloadVideo, extractVideoUrls, extractAudio, transcribeAudio,
+  translateSrt, embedSubtitles, parseSrt, srtToVtt, detectLanguage,
+  initDownloadState, updateDownloadState, getDownloadState, cancelDownload
 } = require('./src/subtitle');
 
 const app = express();
@@ -35,9 +37,9 @@ function createSSE(jobId, res) {
   res.on('close', () => sseClients.delete(jobId));
 }
 
-function sendProgress(jobId, step, total, message, detail) {
+function sendProgress(jobId, step, total, message, detail, extra) {
   const client = sseClients.get(jobId);
-  const payload = JSON.stringify({ step, total, message, detail: detail || '' });
+  const payload = JSON.stringify({ step, total, message, detail: detail || '', extra: extra || null });
   console.log('[' + jobId + '] ' + step + '/' + total + ': ' + message + (detail ? ' (' + detail + ')' : ''));
   if (client) {
     client.write('data: ' + payload + '\n\n');
@@ -59,6 +61,7 @@ const upload = multer({
 app.use(express.json({ limit: '50mb' }));
 app.use(express.static('public'));
 app.use('/files', express.static(SAVED_DIR));
+app.use('/temp', express.static(TEMP_DIR));
 
 function cleanTemp() {
   if (fs.existsSync(TEMP_DIR)) {
@@ -73,16 +76,190 @@ app.get('/api/progress/:jobId', (req, res) => {
   createSSE(req.params.jobId, res);
 });
 
+// ========== TRADUCCION POR LOTES ==========
+const BATCH_SIZE = 5;
+const batchSessions = new Map();
+
+function pruneBatchSessions() {
+  const cutoff = Date.now() - 3 * 60 * 60 * 1000;
+  for (const [id, s] of batchSessions) {
+    if (s.startedAt < cutoff) {
+      batchSessions.delete(id);
+      try { fs.rmSync(s.workDir, { recursive: true, force: true }); } catch(e) {}
+    }
+  }
+}
+
+function batchPayload(s) {
+  const processed = s.cursor;
+  return {
+    success: true,
+    batchPending: true,
+    jobId: s.jobId,
+    imageCount: processed,
+    totalImages: s.images.length,
+    processed,
+    remaining: s.images.length - processed,
+    batchNumber: s.batchNumber,
+    batchSize: BATCH_SIZE,
+    editCount: s.totalEdits,
+    pendingTranslations: s.pendingTranslations || 0,
+    translations: s.translatedResults.slice(),
+    originalImages: s.images.slice(0, processed).map(f => '/temp/' + s.jobId + '/' + path.basename(f)),
+    editedImages: s.editedImages.map(f => '/temp/' + s.jobId + '/edited/' + path.basename(f))
+  };
+}
+
+async function processBatch(s, start, end) {
+  const batchImages = s.images.slice(start, end);
+  const n = s.batchNumber + 1;
+  const TOTAL = s.useBallons ? 5 : 6;
+  sendProgress(s.jobId, 1, TOTAL, 'Lote ' + n + ': traduciendo ' + batchImages.length + ' imagenes (' + (start + 1) + '-' + end + ' de ' + s.images.length + ')...');
+
+  if (s.useBallons) {
+    const batchDir = path.join(s.workDir, '_batch_' + n);
+    fs.rmSync(batchDir, { recursive: true, force: true });
+    fs.mkdirSync(batchDir, { recursive: true });
+    for (const img of batchImages) {
+      fs.copyFileSync(img, path.join(batchDir, path.basename(img)));
+    }
+
+    const bt = await translateFolder(batchDir, s.langName, (info) => {
+      if (info && info.log) {
+        sendProgress(s.jobId, 2, TOTAL, 'BallonsTranslator (lote ' + n + ')', String(info.log).slice(-120));
+        return;
+      }
+      if (info && info.progress != null) {
+        const pct = Math.round(info.progress * 100);
+        sendProgress(s.jobId, 2, TOTAL, 'BallonsTranslator: ' + pct + '%', (info.stage || '') + ' · lote ' + n);
+      }
+    }, s.translator);
+    if (!bt.rendered || bt.rendered.length === 0) {
+      throw new Error('BallonsTranslator no exporto imagenes en el lote ' + n);
+    }
+    s.pendingTranslations += (bt.pendingTranslations || 0);
+    const byName = new Map(batchImages.map(b => [path.parse(path.basename(b)).name, b]));
+    let order = 0;
+    for (const r of bt.rendered) {
+      const idx = s.editedImages.length + 1;
+      const ext = path.extname(r.file) || '.png';
+      const dest = path.join(s.editedDir, 'edited_' + String(idx).padStart(3, '0') + ext);
+      fs.copyFileSync(r.file, dest);
+      s.editedImages.push(dest);
+      const orig = byName.get(path.parse(r.page).name) || batchImages[Math.min(order, batchImages.length - 1)];
+      order++;
+      s.translatedResults.push({
+        image: orig,
+        filename: path.basename(orig),
+        originalText: r.originalText || '',
+        translatedText: r.translatedText || ''
+      });
+      s.totalEdits += (r.translatedBlocks || 0);
+    }
+    try { fs.rmSync(batchDir, { recursive: true, force: true }); } catch(e) {}
+  } else {
+    const ocrResults = await extractTextFromImages(batchImages, (i, total, filename) => {
+      sendProgress(s.jobId, 2, TOTAL, 'OCR (lote ' + n + '): imagen ' + (start + i + 1) + ' de ' + s.images.length, filename);
+    });
+    const translatedResults = await translateTexts(ocrResults, (i, total, filename) => {
+      sendProgress(s.jobId, 3, TOTAL, 'Traduccion (lote ' + n + '): imagen ' + (start + i + 1) + ' de ' + s.images.length, filename);
+    }, { provider: s.translator, targetLang: s.langName });
+    const editedResults = await editMultipleImages(ocrResults, translatedResults, s.editedDir, (i, total, filename) => {
+      sendProgress(s.jobId, 4, TOTAL, 'Edicion (lote ' + n + '): imagen ' + (start + i + 1) + ' de ' + s.images.length, filename, {
+        original: '/temp/' + s.jobId + '/' + filename,
+        edited: '/temp/' + s.jobId + '/edited/edited_' + filename,
+        filename: filename,
+        index: start + i + 1,
+        total: s.images.length
+      });
+    });
+    for (const t of translatedResults) s.translatedResults.push(t);
+    for (const r of editedResults) s.editedImages.push(r.editedPath);
+    s.totalEdits += editedResults.reduce((sum, r) => sum + (r.count || 0), 0);
+  }
+
+  s.cursor = end;
+  s.batchNumber = n;
+}
+
+async function finalizeSession(s) {
+  const TOTAL = s.useBallons ? 5 : 6;
+  const pptxStep = s.useBallons ? 3 : 5;
+  const pdfStep = s.useBallons ? 4 : 6;
+  const processed = s.cursor;
+
+  if (processed === 0) throw new Error('No hay imagenes traducidas para finalizar');
+
+  sendProgress(s.jobId, pptxStep, TOTAL, 'Generando PowerPoint con ' + processed + ' paginas...');
+  await generatePptx(s.editedImages, s.translatedResults, s.workDir);
+  sendProgress(s.jobId, pdfStep, TOTAL, 'Generando PDF...');
+  await generatePdf(s.editedImages, s.translatedResults, s.workDir);
+
+  const finalDir = path.join(SAVED_DIR, s.jobId);
+  fs.mkdirSync(finalDir, { recursive: true });
+
+  if (s.saveFiles) {
+    fs.cpSync(s.workDir, finalDir, { recursive: true });
+  } else {
+    fs.copyFileSync(path.join(s.workDir, 'presentacion.pptx'), path.join(finalDir, 'presentacion.pptx'));
+    fs.copyFileSync(path.join(s.workDir, 'presentacion.pdf'), path.join(finalDir, 'presentacion.pdf'));
+    fs.mkdirSync(path.join(finalDir, 'edited'), { recursive: true });
+    for (const f of fs.readdirSync(s.editedDir)) {
+      fs.copyFileSync(path.join(s.editedDir, f), path.join(finalDir, 'edited', f));
+    }
+  }
+  fs.mkdirSync(path.join(finalDir, 'originals'), { recursive: true });
+  for (const img of s.images.slice(0, processed)) {
+    const fname = path.basename(img);
+    const src = path.join(s.workDir, fname);
+    if (fs.existsSync(src)) fs.copyFileSync(src, path.join(finalDir, 'originals', fname));
+  }
+
+  fs.rmSync(s.workDir, { recursive: true, force: true });
+  if (!s.saveFiles) {
+    setTimeout(() => { try { fs.rmSync(finalDir, { recursive: true, force: true }); } catch(e) {} }, 10 * 60 * 1000);
+  }
+  batchSessions.delete(s.jobId);
+
+  const stoppedEarly = processed < s.images.length;
+  sendProgress(s.jobId, TOTAL, TOTAL, 'Listo! ' + processed + ' imagenes, ' + s.totalEdits + ' textos traducidos' + (stoppedEarly ? ' (proceso detenido antes del final)' : ''));
+
+  return {
+    success: true,
+    jobId: s.jobId,
+    imageCount: processed,
+    totalImages: s.images.length,
+    stoppedEarly,
+    pendingTranslations: s.pendingTranslations || 0,
+    pptxUrl: '/files/' + s.jobId + '/presentacion.pptx',
+    pdfUrl: '/files/' + s.jobId + '/presentacion.pdf',
+    translations: s.translatedResults,
+    originalImages: s.images.slice(0, processed).map(f => '/files/' + s.jobId + '/originals/' + path.basename(f)),
+    editedImages: s.editedImages.map(f => '/files/' + s.jobId + '/edited/' + path.basename(f)),
+    editCount: s.totalEdits
+  };
+}
+
 // ========== IMAGENES ==========
 app.post('/api/process', async (req, res) => {
-  const { url, saveFiles, clientId } = req.body;
+  const { url, saveFiles, clientId, engine, targetLang, translator } = req.body;
   if (!url) return res.status(400).json({ error: 'URL es requerida' });
 
   const jobId = clientId || ('job_' + Date.now());
   const workDir = path.join(TEMP_DIR, jobId);
   const editedDir = path.join(workDir, 'edited');
   fs.mkdirSync(editedDir, { recursive: true });
-  const TOTAL = 6;
+  const useBallons = engine !== 'legacy';
+  const TOTAL = useBallons ? 5 : 6;
+  pruneBatchSessions();
+
+  const session = {
+    jobId, workDir, editedDir, images: [], cursor: 0, batchNumber: 0,
+    langName: targetLang || 'es', saveFiles: !!saveFiles, useBallons,
+    translator: translator === 'meta' ? 'meta' : 'google',
+    editedImages: [], translatedResults: [], totalEdits: 0, pendingTranslations: 0, startedAt: Date.now()
+  };
+  batchSessions.set(jobId, session);
 
   try {
     await waitMs(500);
@@ -90,82 +267,57 @@ app.post('/api/process', async (req, res) => {
     const images = await scrapeImages(url, workDir);
     if (images.length === 0) {
       fs.rmSync(workDir, { recursive: true, force: true });
+      batchSessions.delete(jobId);
       return res.status(404).json({ error: 'No se encontraron imagenes' });
     }
+    session.images = images;
 
-    sendProgress(jobId, 2, TOTAL, 'Leyendo texto de ' + images.length + ' imagenes (OCR)...');
-    const ocrResults = await extractTextFromImages(images, (i, total, filename) => {
-      sendProgress(jobId, 2, TOTAL, 'OCR: imagen ' + i + ' de ' + total, filename);
-    });
-    const withText = ocrResults.filter(r => r.text.length > 0).length;
+    const firstBatch = Math.min(BATCH_SIZE, images.length);
+    await processBatch(session, 0, firstBatch);
 
-    sendProgress(jobId, 3, TOTAL, 'Traduciendo ' + withText + ' imagenes con texto...');
-    const translatedResults = await translateTexts(ocrResults, (i, total, filename) => {
-      sendProgress(jobId, 3, TOTAL, 'Traduccion: imagen ' + i + ' de ' + total, filename);
-    });
-    const translated = translatedResults.filter(r => r.originalText !== r.translatedText).length;
-
-    sendProgress(jobId, 4, TOTAL, 'Editando imagenes: borrando ingles, agregando espanol...');
-    const editedResults = await editMultipleImages(ocrResults, translatedResults, editedDir, (i, total, filename) => {
-      sendProgress(jobId, 4, TOTAL, 'Edicion: imagen ' + i + ' de ' + total, filename);
-    });
-
-    const editedImages = editedResults.map(r => r.editedPath);
-    const totalEdits = editedResults.reduce((sum, r) => sum + (r.count || 0), 0);
-
-    sendProgress(jobId, 5, TOTAL, 'Generando PowerPoint con ' + images.length + ' paginas...');
-    await generatePptx(editedImages, translatedResults, workDir);
-
-    sendProgress(jobId, 6, TOTAL, 'Generando PDF...');
-    await generatePdf(editedImages, translatedResults, workDir);
-
-    const finalDir = path.join(SAVED_DIR, jobId);
-    fs.mkdirSync(finalDir, { recursive: true });
-
-    if (saveFiles) {
-      fs.cpSync(workDir, finalDir, { recursive: true });
-    } else {
-      fs.copyFileSync(path.join(workDir, 'presentacion.pptx'), path.join(finalDir, 'presentacion.pptx'));
-      fs.copyFileSync(path.join(workDir, 'presentacion.pdf'), path.join(finalDir, 'presentacion.pdf'));
-
-      fs.mkdirSync(path.join(finalDir, 'edited'), { recursive: true });
-      for (const f of fs.readdirSync(editedDir)) {
-        fs.copyFileSync(path.join(editedDir, f), path.join(finalDir, 'edited', f));
-      }
-
-      fs.mkdirSync(path.join(finalDir, 'originals'), { recursive: true });
-      for (const img of images) {
-        const fname = path.basename(img);
-        const src = path.join(workDir, fname);
-        if (fs.existsSync(src)) {
-          fs.copyFileSync(src, path.join(finalDir, 'originals', fname));
-        }
-      }
+    if (session.cursor >= images.length) {
+      return res.json(await finalizeSession(session));
     }
-
-    fs.rmSync(workDir, { recursive: true, force: true });
-    if (!saveFiles) {
-      setTimeout(() => { try { fs.rmSync(finalDir, { recursive: true, force: true }); } catch(e) {} }, 10 * 60 * 1000);
-    }
-
-    sendProgress(jobId, TOTAL, TOTAL, 'Listo! ' + images.length + ' imagenes, ' + totalEdits + ' textos traducidos en imagenes');
-
-    const originalUrls = images.map(f => '/files/' + jobId + '/originals/' + path.basename(f));
-    const editedUrls = images.map(f => '/files/' + jobId + '/edited/edited_' + path.basename(f));
-
-    res.json({
-      success: true, jobId, imageCount: images.length,
-      pptxUrl: '/files/' + jobId + '/presentacion.pptx',
-      pdfUrl: '/files/' + jobId + '/presentacion.pdf',
-      translations: translatedResults,
-      originalImages: originalUrls,
-      editedImages: editedUrls,
-      editCount: totalEdits
-    });
+    return res.json(batchPayload(session));
   } catch (error) {
     console.error('Error:', error);
     sendProgress(jobId, 0, TOTAL, 'Error: ' + error.message);
     try { fs.rmSync(workDir, { recursive: true, force: true }); } catch(e) {}
+    batchSessions.delete(jobId);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/batch/:jobId/action', async (req, res) => {
+  const { jobId } = req.params;
+  const action = (req.body && req.body.action) || '';
+  pruneBatchSessions();
+  const s = batchSessions.get(jobId);
+  if (!s) {
+    return res.status(404).json({ error: 'La sesion de traduccion expiro o no existe. Vuelve a iniciar el proceso.' });
+  }
+  const TOTAL = s.useBallons ? 5 : 6;
+
+  try {
+    if (action !== 'continue' && action !== 'rest' && action !== 'stop') {
+      return res.status(400).json({ error: 'Accion no valida: ' + action });
+    }
+
+    const remaining = s.images.length - s.cursor;
+    if (action === 'stop' || remaining <= 0) {
+      return res.json(await finalizeSession(s));
+    }
+
+    const count = action === 'rest' ? remaining : Math.min(BATCH_SIZE, remaining);
+    await processBatch(s, s.cursor, s.cursor + count);
+
+    if (s.cursor >= s.images.length) {
+      return res.json(await finalizeSession(s));
+    }
+    return res.json(batchPayload(s));
+  } catch (error) {
+    console.error('Error en lote:', error);
+    sendProgress(jobId, 0, TOTAL, 'Error: ' + error.message);
     res.status(500).json({ error: error.message });
   }
 });
@@ -218,28 +370,99 @@ app.post('/api/regenerate/:jobId', async (req, res) => {
 
 // ========== SUBTITULOS ==========
 
-app.post('/api/subtitle/download', async (req, res) => {
-  const { url, clientId } = req.body;
+function startDownloadJob(jobId, url, quality, mode) {
+  const workDir = path.join(TEMP_DIR, jobId);
+  initDownloadState(jobId, { url, mode: mode || 'download', videoUrl: '/api/video/' + jobId });
+
+  setImmediate(async () => {
+    try {
+      sendProgress(jobId, 1, 2, 'Conectando con la pagina...', '', { kind: 'download', pct: 0 });
+      const result = await downloadVideo(url, workDir, quality || 'best', (pct, mb, totalMb, msg) => {
+        const text = msg || ('Descargando: ' + pct + '% (' + mb + 'MB / ' + totalMb + 'MB)');
+        sendProgress(jobId, 1, 2, text, '', { kind: 'download', pct: pct || 0 });
+        updateDownloadState(jobId, { status: 'downloading', pct: pct || 0, message: text });
+      }, {
+        jobId,
+        onStatus: (msg) => {
+          sendProgress(jobId, 1, 2, msg, '', { kind: 'download', pct: 0 });
+          updateDownloadState(jobId, { status: 'downloading', message: msg });
+        }
+      });
+
+      const state = getDownloadState(jobId) || {};
+      const title = result.title || state.title || 'video';
+      const filename = path.basename(result.path);
+      updateDownloadState(jobId, { status: 'done', pct: 100, title, filename, message: 'Video listo', error: null });
+
+      sendProgress(jobId, 2, 2, 'Video listo: ' + title, '', {
+        kind: 'download', pct: 100, done: true,
+        videoUrl: '/api/video/' + jobId, title, filename
+      });
+      console.log('[' + jobId + '] Descarga completa: ' + title);
+    } catch (error) {
+      const cancelled = /cancelada/i.test(error.message);
+      const message = cancelled ? 'Descarga cancelada' : ('Error: ' + error.message);
+      console.error('[' + jobId + '] ' + message);
+      updateDownloadState(jobId, {
+        status: cancelled ? 'cancelled' : 'error',
+        error: cancelled ? null : error.message,
+        message
+      });
+      sendProgress(jobId, cancelled ? 2 : 0, 2, message, '', {
+        kind: 'download', pct: 0, error: !cancelled, cancelled
+      });
+      try { fs.rmSync(workDir, { recursive: true, force: true }); } catch (e) {}
+    }
+  });
+}
+
+app.post('/api/subtitle/download', (req, res) => {
+  const { url, clientId, quality, mode } = req.body;
   if (!url) return res.status(400).json({ error: 'URL es requerida' });
 
   const jobId = clientId || ('sub_' + Date.now());
   const workDir = path.join(TEMP_DIR, jobId);
 
+  try { fs.rmSync(workDir, { recursive: true, force: true }); } catch (e) {}
+  fs.mkdirSync(workDir, { recursive: true });
+
+  startDownloadJob(jobId, url, quality || 'best', mode || 'download');
+
+  res.json({ success: true, jobId, queued: true, videoUrl: '/api/video/' + jobId });
+});
+
+app.get('/api/subtitle/status/:jobId', (req, res) => {
+  const st = getDownloadState(req.params.jobId);
+  if (!st) return res.status(404).json({ error: 'Descarga no encontrada' });
+  res.json(Object.assign({ success: true }, st));
+});
+
+app.post('/api/subtitle/cancel/:jobId', (req, res) => {
+  cancelDownload(req.params.jobId);
+  res.json({ success: true });
+});
+
+app.post('/api/subtitle/detect-quality', async (req, res) => {
+  const { url } = req.body;
+  if (!url) return res.status(400).json({ error: 'URL es requerida' });
+
   try {
-    fs.mkdirSync(workDir, { recursive: true });
-    sendProgress(jobId, 1, 2, 'Descargando video desde URL...');
-    const videoPath = await downloadVideo(url, workDir);
-    sendProgress(jobId, 2, 2, 'Video descargado');
-
-    const videoFiles = fs.readdirSync(workDir).filter(f => /^video\.\w+$/.test(f));
-    const videoUrl = '/api/video/' + jobId;
-
-    res.json({ success: true, jobId, videoUrl, filename: videoFiles[0] || 'video.mp4' });
+    const videoUrls = await extractVideoUrls(url);
+    if (videoUrls && (videoUrls.videoUrl || videoUrls.altUrl)) {
+      const qualities = [];
+      if (videoUrls.videoUrl) {
+        qualities.push({ url: videoUrls.videoUrl, label: videoUrls.videoUrlText || 'LQ', isHd: false });
+      }
+      if (videoUrls.altUrl) {
+        qualities.push({ url: videoUrls.altUrl, label: videoUrls.altUrlText || 'HQ', isHd: videoUrls.altUrlHd });
+      }
+      res.json({ success: true, title: videoUrls.title, qualities });
+    } else {
+      res.json({ success: true, title: null, qualities: [] });
+    }
   } catch (error) {
-    console.error('Error:', error);
-    sendProgress(jobId, 0, 2, 'Error: ' + error.message);
-    try { fs.rmSync(workDir, { recursive: true, force: true }); } catch(e) {}
-    res.status(500).json({ error: error.message });
+    console.log('No se pudo detectar calidad: ' + error.message);
+    res.json({ success: true, title: null, qualities: [] });
   }
 });
 
@@ -277,6 +500,21 @@ app.get('/api/video/:jobId', (req, res) => {
 
   const videoPath = path.join(dir, videoFiles[0]);
   const stat = fs.statSync(videoPath);
+  const wantsFile = req.query.download === '1';
+
+  if (wantsFile) {
+    const st = getDownloadState(jobId);
+    const rawTitle = (st && st.title) ? st.title : 'video';
+    const asciiName = rawTitle.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-zA-Z0-9 _.-]+/g, '').trim().slice(0, 80) || 'video';
+    const utfName = rawTitle.replace(/[\\/:*?"<>|]+/g, '_').slice(0, 80) || 'video';
+    res.writeHead(200, {
+      'Content-Type': 'video/mp4',
+      'Content-Length': stat.size,
+      'Content-Disposition': 'attachment; filename="' + asciiName + '.mp4"; filename*=UTF-8\'\'' + encodeURIComponent(utfName + '.mp4')
+    });
+    return fs.createReadStream(videoPath).pipe(res);
+  }
+
   const range = req.headers.range;
 
   if (range) {
